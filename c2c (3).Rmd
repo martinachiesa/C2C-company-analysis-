@@ -1,0 +1,811 @@
+---
+title: "Costruzione di un modello lineare robusto relativo ad un e-commerce francese"
+author: "Martina Chiesa 837484, Carlo Saccardi 839641, Davide Valoti 846737"
+date: "19/11/2020"
+output: word_document
+---
+obiettivo: costruire un modello lineare robusto.
+- lineare nei parametri, ovvero un modello analitico di facile interpretazione, tuttavia è possibile ricorrere a tecniche non lineari e non parametriche per renderli lineari
+- robusto all'allontanamento delle ipotesi su cui si basa: controllare il rispetto delle ipotesi -> modificarlo -> fare pre-processing -> migliorarlo ai fini dell'adattamento 
+il requisito di robustezza sul modello è fondamentale per essere un buon previsore 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Il dataset scelto contiene informazioni relative ad un e-commerce francese di successo, presente in diversi Paesi, basato sul modello economico C2C (customer to customer), in cui ogni utente è sia venditore, sia acquirente. Il dataset è composto da 98913 righe e 24 colonne. Ciascuna riga corrisponde a un utente registrato, quindi, nel file non sono presenti clienti non registrati, infatti la variabile type presenta una sola modalità. Sono presenti sia variabili quantitative sia qualitative: 
+- identifierHash comprende i codici identificativi corrispondenti a ciascun utente; 
+- type indica la tipologia di cliente; 
+- country e countryCode corrispondono a nome e codice ISO del Paese di appartenenza dell’utente; 
+- language si riferisce alla lingua selezionata come preferita tra le cinque opzioni proposte; 
+- socialNbFollowers numero di utenti iscritti all’attività di questo user; 
+- socialNbFollows numero di utenti seguiti dallo user; 
+- socialProductsLiked numero di prodotti graditi dall’utente; 
+- productsListed numero di prodotti attualmente non venduti ma caricati dall’utente; 
+- productsSold numero di prodotti venduti; 
+- productsPassRate percentuale di prodotti la cui descrizione è coerente col bene offerto; 
+- productsWished numero di prodotti aggiunti alla lista dei desideri; productsBought numero di prodotti acquistati; 
+- gender genere dell’utente; 
+- civilityTitle e civilityGenderId indica lo stato civile e la rispettiva codifica in numeri da 1 a 3; 
+- hasAnyApp indica se l’utente ha mai utilizzato l’app ufficiale dello store, in caso affermativo, se è la versione Android hasAndroidApp o Ios hasIosApp; hasProfilePicture segnala se è presente l’immagine del profilo; 
+- daysSinceLastLogin è il numero di giorni trascorsi dall’ultimo login; - seniority, seniorityAsMonths, seniorityAsYears corrispondono rispettivamente al numero di giorni, mesi e anni decorsi dalla registrazione.
+```{r}
+d <- read.csv("dati.csv", sep=","
+                  , dec = ".",  
+                  stringsAsFactors=TRUE, na.strings=c("NA","NaN",-1))
+summary(d)
+```
+
+Tramite la funzione summary si ottengono alcune delle statistiche descrittive univariate relative ad ogni variabile.
+Notiamo che non sono presenti valori negativi nel dataset, infatti per tutte le variabili il valore minimo è pari o superiore a 0. I valori -1 presenti nel file sono stati letti come mancanti, durante l'importazione del dataset.
+Il maggior numero di utenti è francese, come ci aspettavamo, dato che l'e-commerce è nato proprio in questo Stato, ma la lingua più ricorrente, tra le 5 presenti, è l'inglese.
+Rilevante è inoltre la presenza di valori mancanti per le variabili *proudctsListed* e *productsWished*.
+Dando uno sguardo alla variabile dipendente scelta (*productsSold*), si osserva che il valore medio assegnato a questa è 0.12. 
+Dal terzo quartile si constata che, almeno il 75% degli utenti non ha venduto nessun prodotto. Il campo di variazione è ampio poichè, il numero massimo di prodotti venduti è 174, rispetto al minimo 0. 
+
+L'intero file contiene dati relativi agli utenti registrati, i quali possono sia aver venduto, che non. Vogliamo quindi indagare la differenza tra queste due categorie di utenti.
+```{r}
+table(d$productsSold>0)
+```
+
+Coloro che hanno venduto almeno un prodotto sono 2036 e corrispondono solo al 2% circa di tutti gli utenti presenti nel dataset.
+
+Procediamo quindi con la creazione di un nuovo dataset che contiene unicamente questi ultimi, ovvero i venditori.
+```{r}
+d0 <- d[d$productsSold>0,]
+summary(d0$productsSold)
+```
+
+Il dataset ridotto presenta lo stesso numero di variabili di quello completo.
+I cambiamenti della variabile dipendente sono evidenti, infatti, ora dalla mediana si osserva che la metà degli utenti ha venduto al massimo 2 prodotti. 
+Un quarto ha venduto un solo prodotto; un altro quarto, invece 3, 4 o 5 prodotti (terzo quartile). La media del numero di prodotti venduti è pari quasi a 6 prodotti.
+
+```{r}
+library(funModeling)
+library(dplyr)
+status = df_status(d0, print_results=F)
+status
+```
+
+Tramite la funzione df_status si osservano le quantità in termini assoluti e percentuali del numero di 0, di NA e di valori unici presenti nel dataset per ogni variabile. 
+Le due percentuali di valori mancanti (4.96 e 3.19) sono poco elevate, quindi decidiamo di conservare le rispettive variabili nel dataset e procedere successivamente con l'imputazione. 
+La variabile *civilityGenderId* assume valore 1, 2 o 3, tuttavia non si tratta di una variabile quantitativa, poichè queste tre cifre sono codifiche dei tre livelli presenti in *civilityTitle*, ovvero 'miss', 'mr', e 'mrs'.
+Dunque, procediamo con la correzione, trasformandola in fattore a tre livelli.
+```{r}
+d0$civilityGenderId <- as.factor(d0$civilityGenderId)
+```
+
+Innanzitutto, rimuoviamo la variabile identificativa *identifierHash*, e *type*, poichè presenta un solo livello, quindi si tratta di una variabile non discriminante.
+```{r}
+d0$identifierHash = NULL
+d0$type = NULL
+```
+
+## NA analysis
+nel 1976 Rubin classifica 3 tipi di valori mancanti:
+1. MCAR (missing completely at random): gli NA non dipendono nè dalle variabili osservate nè da quelle non osservate nel dataset 
+-> CC (complete case analysis): eliminare righe con NA
+2. MAR (missing at random): NA dipendono dalle variabili osservate nel dataset -> cercare l'associazione tra le variabili
+-> MI (multiple imputation) -> sensata se numero di NA limitato (<30%): 
+  - metodi naive: single imputation: sostituire i valori mancanti di una variabile con la rispettiva stima di media mediana o moda 
+    -> riduzione artificiale della variabilità
+    -> alterazione dell'intensità di correlazione tra variabile imputata e le altre 
+  - metodi non naive: multiple imputation
+    - SAS miner:
+      * esclude y
+      * costruzione di modello che ha come target la variabile xj con NA e covariate le altre complete
+      * calcolare valori previsti per ogni soggetto i tramite tale modello 
+      * imputazione dati mancanti
+    - FCS (fully conditional methods):
+      * scelta di K numero di ripetizioni (K=1 -> SAS miner)
+      * fissare n, dimensione di ogni campione
+      * escludere y
+      * stimare un modello per ogni campione k
+      * predire il valore xij per il soggetto i-esimo sostiuendo nel modello stimato i valori delle altre covariate
+      * ripetere K volte
+      * imputare il dato mancante come la media dei K valori previsti
+    - Mice imputation -> + robusto dell'FCS:
+      = FCS ma dopo aver calcolato la media dei K valori previsti opera con diverse strategie
+      esempio: pmm (predictive mean matching): sceglie 10 valori osservati nel dataset per la variabile xj più prossimi alla media dei K valori previsti -> imputa l'NA con uno tra questi 10 scelto a caso -> garantisce effetto di randomness 
+3. MNAR (missing not at random): NA dipendono da variabili non osservate nel dataset -> meccanismo incontrollabile tramite le sole informazioni del dataset
+```{r}
+library(VIM)
+missingness<- aggr(d0, col=c('navyblue','yellow'), numbers=TRUE, sortVars=TRUE, labels=names(d0), cex.axis=.5,gap=2)
+```
+
+In giallo si evidenzia la proporzione di dati mancanti e la combinazione con cui questi si presentano. Ci sono righe che hanno NA per entrambe le variabili ed altre che sono caratterizzate da un solo valore mancante. 
+
+Per conferma utilizziamo un'altra tecnica di verifica:
+```{r}
+sapply(d0, function(x)(sum(is.na(x))))
+```
+
+*productsListed* presenta 101 dati mancanti e *productsWished* 65.
+
+Decidiamo di procedere con la mice imputation:
+```{r}
+library(dplyr)
+numeric <- d0%>% dplyr::select_if(is.numeric)
+covariate <- numeric[, -c(5)]
+library(mice)
+md.pattern(covariate)
+nrow(na.omit(covariate))
+```
+
+Consideriamo solo le variabili numeriche escludendo quella dipendente e osserviamo che ci sono 1920 righe complete, 15 presentano valori mancanti solo per la variabile *productsListed*, 51 per *productsWished* e 50 per entrambe. Quindi sarà necessario stimare 166 valori. 
+
+Scegliamo di utilizzare il metodo pmm (predictive mean matching) con 5 ripetizioni. Questo metodo stima un modello per ciascun campione (per noi 5), considerando come variabile target quella incompleta. Ora risulta possibile ricavare, per ogni dato mancante, 5 previsioni.
+Una volta calcolata la media tra queste cinque previsioni, vengono considerati i 10 valori osservati nel dataset più prossimi a tale media, e ne viene estratto uno casualmente, che diventa il prescelto per imputare l'NA. La tecnica di selezione casuale tra le 10 osservazioni garantisce effetto di randomness.
+```{r}
+tempData <- mice(covariate, m=5, maxit = 20, meth='pmm', seed=500) 
+```
+
+L'imputazione è andata a buon fine, in quanto è stata raggiunta convergenza.
+
+Inserendo nel dataset i valori imputati ne otteniamo uno nuovo e verifichiamo che non siano più presenti dati mancanti.
+```{r}
+data_imputed <- complete(tempData,1)
+sapply(data_imputed, function(x)(sum(is.na(x))))
+```
+
+## Collinearità
+L'analisi della collinearità è uno step necessario per la costruzione di un modello robusto
+è un problema che si verifica quando alcune variabili si muovono insieme in modo sistematico 
+variabili strettamente correlate tra loro 
+-> non c'è garanzia che i dati siano ricchi di informazione 
+-> non è possibile isolare la relazione o i parametri di interesse, cioè gli effetti separati delle singole variabili indipendenti
+-> gli stimatori possono essere molto sensibili all'aggiunta o alla rimozione di poche osservazioni
+
+in caso di esatta multicollinearità X'X non è invertibile, si tratta di una matrice non a rango pieno, quindi l'SE tende a infinito -> errore in R -> violazione delle assunzioni
+in caso di non esatta multicollinearità, le stime ci sono, ma imprecise (nella matrice delle correlazioni ci sono valori molto alti fuori dalla diagonale, ma non esattamente pari a 1) -> alto SE -> stima non significativamente diverso da 0 -> intervallo stimato molto ampio
+
+avvisi di multicollinearità:
+- alti standard error
+- grande statistica F (elevato R^2), ma bassa statistica T (SE -> infinito)
+- elevata correlazione tra i parametri stimati
+- riga di NA nel summary di un modello in relazione a variabile continua
+
+attraverso la model selection si risolve molto velocemente il problema di collinearità, poichè il processo di selezione, per costruzione, non conserva nel modello finale variabili collineari, scegliendo in base ai valori di R^2 maggiori o p-value più bassi
+
+Tramite la funzione corrgram viene proposta una rappresentazione grafica delle correlazioni presenti tra le variabili quantitative considerate. 
+```{r}
+library(dplyr)
+numeric <- data_imputed%>% dplyr::select_if(is.numeric)
+require(corrgram)
+corrgram(numeric,lower.panel = panel.cor, cex=1, cex.labels = 1)
+```
+
+Notiamo come le variabili *seniority*, *senorityAsMonths* e *seniorityAsYears* sono perfettamente correlate, come era lecito aspettarsi. Anche tra le variabili *socialNbFollowers*, *socialNbFollows* e *socialProductsLiked* sono presenti forti correlazioni positive. 
+
+Questa rappresentazione mediante matrice delle collinearità presenta alcuni limiti, 
+risulta infatti, di difficile interpretazione quando il numero di variabili è elevato, inoltre, analizza solamente le correlazioni bivariate. 
+Procediamo allora con le diagnostiche tramite altre metodologie, che permettano di considerare anche la presenza di possibile multicollinearità.
+Formuliamo un nuovo modello che spiega la variabile risposta solamente tramite le variabili quantitative per poter poi procedere all'analisi di VIF e TOL.
+
+calcolare regressione di ogni covariata quantitativa sulle altre 
+trovare R^2 per misurare il grado di multicollinearità della variabile xj
+TOL = 1-R^2j -> è pari a 0 in caso di massima collinearità, 1 se X è ortogonale
+indica la parte di xj non spiegata dalle altre covariate
+VIF (variance inflation factor) = 1/TOL -> 
+```{r}
+numeric_model = lm(d0$productsSold ~ socialNbFollowers + socialNbFollows + 
+                   socialProductsLiked + productsListed + productsPassRate + 
+                   productsWished + productsBought + daysSinceLastLogin + seniority 
+                   + seniorityAsMonths + seniorityAsYears, data = numeric)
+library(mctest)
+imcdiag(numeric_model)
+```
+
+La colonna Klein presenta il valore 1 in corrispondenza di sei variabili, tale numero è sinonimo di collinearità. La tolleranza (TOL) è il valore di 1-R2j dove R2j indica l'indice di determinazione del modello che ha come variabile risposta la j-esima variabile e come covariate le restanti, mentre VIF è l'inverso della tolleranza. 
+Questi indici si servono dell'R^2, perchè questo è in grado di esprimere la quota di varianza spiegata della variabile risposta dalle covariate congiuntamente.
+Convenzionalemnte, i valori di VIF devono essere inferiori a 5 mentre i valori di TOL superiori a 0,3. Procediamo, quindi, all'eliminazione della variabile che presenta un valore di VIF più elevato, ovvero *seniority*. Segue, poi la stima del nuovo modello. 
+```{r}
+numeric$seniority = NULL
+numeric_model2 = lm(d0$productsSold ~ socialNbFollowers + socialNbFollows + 
+                    socialProductsLiked + productsListed + productsPassRate + 
+                    productsWished + productsBought + daysSinceLastLogin + 
+                    seniorityAsMonths + seniorityAsYears, data = numeric)
+imcdiag(numeric_model2)
+```
+
+I valori di VIF sono diminuiti, ma rimangono sopra la soglia 5, pertanto procediamo all'eliminazione della variabile *seniorityAsYears* che presenta il valore maggiore.
+```{r}
+numeric$seniorityAsYears = NULL
+numeric_model3 = lm(d0$productsSold ~ socialNbFollowers + socialNbFollows + 
+                    socialProductsLiked + productsListed + productsPassRate +
+                    productsWished + productsBought + daysSinceLastLogin +
+                    seniorityAsMonths, data = numeric)
+imcdiag(numeric_model3)
+```
+
+Osserviamo valori più contenuti, l'unica variabile che non rispetta le soglie, anche se di poco, è *socialNbFollows* il cui valore del VIF è di poco superiore a 5 e la tolleranza è pari a 0.20 circa, quindi procediamo alla sua eliminazione e riformuliamo il modello.
+```{r}
+numeric$socialNbFollows = NULL
+numeric_model4 = lm(d0$productsSold ~ socialNbFollowers + 
+                    socialProductsLiked + productsListed + productsPassRate +
+                    productsWished + productsBought + daysSinceLastLogin + 
+                    seniorityAsMonths, data = numeric)
+imcdiag(numeric_model4)
+```
+
+Osserviamo che la colonna Klein non individua più collinearità, i valori di VIF sono tutti inferiori a 5 e quelli di TOL superiori a 0.30. Concludiamo che non risultano ulteriori eliminazioni da compiere e rimangono otto covariate quantitative.
+
+Analizziamo ora le associazioni tra le variabili qualitative. 
+Se il chi quadro normalizzato associato a una coppia di variabili presenta un valore superiore a 0.90, allora è presente una forte associazione, quindi escludiamo una tra le due variabili coinvolte.
+```{r}
+factor <- d0%>% dplyr::select_if(is.factor)
+library(plyr)
+combos <- combn(ncol(factor),2)
+adply(combos, 2, function(x) {
+  test <- chisq.test(factor[, x[1]], factor[, x[2]])
+  tab  <- table(factor[, x[1]], factor[, x[2]])
+  out <- data.frame("Row" = colnames(factor)[x[1]]
+                    , "Column" = colnames(factor[x[2]])
+                    , "Chi.Square" = round(test$statistic,3)
+                    , "df"= test$parameter
+                    , "p.value" = round(test$p.value, 3)
+                    , "n" = sum(table(factor[,x[1]], factor[,x[2]]))
+                    , "Chi.Square norm"  =test$statistic/(sum(table(factor[,x[1]], factor[,x[2]]))* min(length(unique(factor[,x[1]]))-1 , length(unique(factor[,x[2]]))-1)))
+return(out)
+}) 
+```
+
+Notiamo dalla colonna Chi.Square.norm un valore pari a 1 per le coppie di variabili *gender* con *civilityTitle*, *gender* con *civilityGenderId* e *civilityTitle* con *civilityGenderId*. 
+
+```{r}
+table(factor$civilityTitle, factor$gender)
+table(factor$civilityGenderId, factor$gender)
+```
+
+Dalla tabella di contigenza notiamo infatti massima associazione tra queste variabili. Tale risultato era prevedibile, poichè tutte e tre considerano il genere.
+
+Procediamo all'eliminazione delle variabili *gender* e *civilityGenderID* poichè entrambe perfettamente associate alla variabile *civilityTitle*.  
+```{r}
+factor$civilityGenderId = NULL
+factor$gender = NULL
+combos <- combn(ncol(factor),2)
+adply(combos, 2, function(x) {
+  test <- chisq.test(factor[, x[1]], factor[, x[2]])
+  tab  <- table(factor[, x[1]], factor[, x[2]])
+  out <- data.frame("Row" = colnames(factor)[x[1]]
+                    , "Column" = colnames(factor[x[2]])
+                    , "Chi.Square" = round(test$statistic,3)
+                    , "df"= test$parameter
+                    , "p.value" = round(test$p.value, 3)
+                    , "n" = sum(table(factor[,x[1]], factor[,x[2]]))
+                    , "u1" =length(unique(factor[,x[1]]))-1
+                    , "u2" =length(unique(factor[,x[2]]))-1
+                    , "nMinu1u2" =sum(table(factor[,x[1]], factor[,x[2]]))* min(length(unique(factor[,x[1]]))-1 , length(unique(factor[,x[2]]))-1) 
+                    , "Chi.Square norm"  =test$statistic/(sum(table(factor[,x[1]], factor[,x[2]]))* min(length(unique(factor[,x[1]]))-1 , length(unique(factor[,x[2]]))-1)))
+  return(out)
+})
+```
+
+I chi quadrati normalizzati osservati tra le variabili qualitative rimaste sono tutti inferiori alla soglia 0.90, pertanto non procediamo ad ulteriori eliminazioni.
+Dopo l'analisi dei chi quadrati rimangono in considerazione otto variabili qualitative.
+
+## Starting model
+Procediamo alla formulazione dello starting model.
+```{r}
+data_completo <- cbind(d0$productsSold,numeric,factor)
+names(data_completo)[names(data_completo) == "d0$productsSold"] <- "productsSold"
+starting_model = lm(productsSold ~ socialNbFollowers + socialProductsLiked + 
+                      productsListed + productsPassRate + productsWished + 
+                      productsBought + daysSinceLastLogin + seniorityAsMonths + 
+                      language + civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp
+                      + hasProfilePicture + country + countryCode, data =
+                      data_completo)
+par(mfrow=c(2,2)) 
+plot(starting_model)
+par(mfrow=c(1,1))
+```
+
+Uniamo le variabili qualitative e quantitative rimaste in analisi con la variabile risposta. 
+Il modello presenta un R2adj di circa 0.63 e un elevato numero di coefficienti, molti non significativi. Analizziamo ora i grafici per valutare le assunzioni di robustezza sul modello.
+I grafici del modello di partenza presentano diverse problematiche. Notiamo in particolare valori di leverage molto elevati e una situazione di forte eteroschedasticità (terzo grafico).
+
+## Linearità
+valutabile tramite:
+- plot residui vs fittati
+- plot residui vs un'esplicativa
+(stessi plot utili per eteroschedasticità)
+
+risolvere tale problema garantisce un modello con performance previsive migliori -> rimedi:
+- trasformare y
+- trasformare covariate
+
+Procediamo con l'analisi della linearità per il modello iniziale, dapprima valutando la variabile risposta. L'ipotesi di linearità è un'assunzione molto forte e se non rispettata comporta stime non BLUE, distorte ed inefficienti.
+
+BoxCox scoprirono che l'MSE (mean square error)=SSE/(n-p) (sum of square error = residual sum of squares RSS) degli stimatori OLS è fortemente legato alla non linearità -> alto MSE, non linearità
+-> propongono procedura di massima verosimiglianza per stimare un parametro di trasformazione lambda, dati gli OLS in una regressione che presenta covariate lineari X
+procedura che minimizza la radice dell'MSE 
+Y^(lambda)= y^lam/lam se lam =/= 0, logY se lam=0 
+lam = 1 -> y non può essere ulteriormente modificata perchè non esiste trasformazione che renda lineare il modello 
+
+Tramite la funzione boxcox otteniamo il valore di lambda. che minimizza l'SSE (sum of squares errors), a cui dobbiamo elevare la variabile risposta per ottenere la miglior trasformazione di questa.
+```{r}
+library(MASS)
+bc <- boxcox(starting_model, plotit = T)
+lambda = bc$x[which.max(bc$y)]
+lambda
+```
+
+Il valore di lambda risulta essere prossimo a -0.5.
+
+```{r}
+model_1 = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + productsListed
+              + productsPassRate + productsWished + productsBought + daysSinceLastLogin +
+              seniorityAsMonths + language + civilityTitle + hasAnyApp + hasAndroidApp +
+              hasIosApp + hasProfilePicture + country + countryCode, data = data_completo)
+par(mfrow=c(2,2)) 
+plot(model_1)
+par(mfrow=c(1,1))
+```
+
+L'R^2 aggiustato di questo modello aumenta rispetto al precedente, tuttavia il nostro intento è quello di migliorare i grafici per garantire l'assunzione di robustezza del modello, senza concentrarci sull'adattamento dei dati.
+Notiamo inoltre un cambiamento della variabile più significativa, che risulta essere *productsPassRate* mentre prima della trasformazione era identificata da *socialNbFollowers*.
+I grafici appaiono molto differenti rispetto a quelli del modello iniziale. In particolare, si evince un netto miglioramento del terzo grafico relativo ai fitted values che ora sembrano essere più distribuiti e più lineari.
+
+se i residui sono simmetrici -> ok
+-> verifiche attraverso:
+  - qq plot: se ci sono numerosi punti fuori dalla linea -> tanti outliers -> no normalità
+  - Shapiro Wilk test: test di normalità dei residui -> H0 normalità residui, se il p-value <0.05 rifiuo H0 al 5% di significatività
+
+Monitoriamo l'evoluzione del nostro modello anche tramite il grafico di Y vs Yfittati.
+```{r}
+plot((data_completo$productsSold)^(-0.5), model_1$fitted.values)
+```
+
+Anche questo grafico è nettamente migliore del precedente, poichè l'andamento dei dati sembra essersi linearizzato, pur restando alcune osservazioni anomale.
+
+A questo punto dell'analisi, ci concentriamo sulla linearità delle singole covariate, nello specifico operiamo con l'optimal grouping per le variabili qualitative.
+
+- ridurre i livelli in base alla relazione con y: osservo le distribuzioni di y condizionate ai diversi livelli di xj e li confronto 
+  -> elimino categorie che hanno simile distribuzione di y
+  -> no ridondanza
+
+- provare diversi ANOVA: aggregare i livelli sulle similarità degli lsmeans
+  -> scegliere quello con minor errore AIC tra tutte le combinazioni
+  -> tramite OPSCORE in SAS pro transreg e mergefactors in R
+-> optimal grouping: propone il piano di aggregazione migliore con una statistica di errore minore
+-> ricodificare prima come numerica poi come fattore la variabile 
+-> nuova versione della variabile offre un miglioramento di R^2adj
+-> eseguire controlli tramite boxplot -> diversificazioni 
+
+Le variabili *country* e *countryCode* presentano un numero elevato di livelli, corrispondenti a 42 Stati, quindi ci serviamo della procedura di optimal grouping per ridurli. 
+```{r}
+library(factorMerger)
+reduce_levels <- mergeFactors(response = data_completo$productsSold, factor = data_completo$countryCode)
+plot(reduce_levels, panel = "GIC", title = "", panelGrid = FALSE)
+opt_group = cutTree(reduce_levels)
+```
+
+Il Merging Path Plot panel mostra la struttura gerarchica delle similarità tra i gruppi. Le stelle indicano quanto sono significative le differenze tra due cluster.
+I valori numerici sono i valori della funzione di logverosimiglianza per ogni modello della lista. Invece, il GIC panel mostra il criterio di informazione generalizzato per tutti i modelli presenti nel merging path plot. (default penalty=2 indica il criterio AIC).
+I 2036 utenti sono classificati attraverso l'optimal grouping in base alla sigla dello Stato in cinque gruppi di ampiezza differente: il più numeroso comprende 1056 utenti e il più piccolo ne caratterizza solo 6.
+
+Ora procediamo trasformando la variabile in numerica e poi fattoriale.
+```{r}
+opt_group2 = as.numeric(opt_group)
+table(opt_group2)
+data_completo$optimal_countrycode = as.factor(opt_group2)
+d0$optimal_countrycode = as.factor(opt_group2)
+```
+
+Otteniamo quindi *optimal_countrycode*, una variabile ricodificata in livelli identificati con numeri interi da 1 a 5.
+
+```{r}
+plot(data_completo$optimal_countrycode, data_completo$productsSold)
+```
+
+I boxplot confermano la divisione in gruppi effettuata ed è possibile osservare che i valori delle mediane aumentano in corrispondenza del passaggio al livello successivo. Tale considerazione è in accordo con la procedura di optimal grouping svolta.
+Sono presenti anche dei possibili valori anomali, in particolare per i primi tre livelli, ovvero quelli che comprendono più osservazioni.
+
+trasformazioni variabili quantitative:
+1. trasformazioni analitiche
+2. optimal binning
+3. regressione non parametrica
+
+2. optimal binning:
+  - trasformare x da quantitativa a qualitativa ordinale, per catturare la non linearità nella relazione x-y e riducendo l'asimmetria di x -> variabili fortemente asimmetriche pericolose per linearità ed eteroschedasticità:
+    - equal count: creazione di intervalli con lo stesso numero di osservazioni 
+    - equal interval: suddividere il range di x in intervalli, il numero di osservazioni in ciascun intervallo può essere differente 
+    
+3. regressione non parametrica: esaminare la distribuzione di y come funzione delle covariate senza assumere in anticipo che forma assume la funzione -> Additive model:
+- linear smooth:
+  - MA
+  - LA
+  - LWA
+  - LOESS
+- splines
+
+Additive Model: 
+generalizzazione del modello di regressione multipla che vuole mantenere la natura additiva del modello
+-> esistono trasformazioni f non necessariamente analitiche delle covariate di partenza che rendono il modello iniziale parametrico più lineare
+-> perdita di linearità derivata dai coefficienti, ma ricava in termini di trasformazioni delle covariate
+vantaggi: 
+  - no rigide assunzioni parametriche 
+  - possibile identificare e caratterizzare gli effetti della regressione non lineare
+  - evitare problemi sulla dimensionalità della struttura additiva
+  - più flessibile rispetto al modello lineare mantenendo parte della sua interpretabilità
+svantaggi:
+  - limitazioni su dataset grandi
+  - limitazioni per previsioni, poichè sono specializzati sui dati in questione
+
+una volta stimato il modello additivo noi comunque vogliamo un modello lineare robusto, che deve presentare coefficienti beta che indichino il peso di ogni variabile sulla dipendente 
+-> ricavo le funzioni f e poi ristimo il modello con OLS 
+
+-> si basano su smooth function che fittano y
+- MA moving average:
+  * considero una covariata 
+  * divido il range di x in k finestre di ampiezza h (scelgo tra equal lenght o equal number)
+  * chiamo il punto focale x0 il punto centrale di x nella finestra
+  * calcolo la media di y|x0 
+  * unisco tutti i punti di medie condizionate appena ottenuti
+- LA local average:
+  migliora lo smooth -> più flessibile 
+  finestre mobili -> un punto può figurare su più finestre 
+  all'inizio e alla fine si verificano delle rette poichè si hanno pochi punti -> flattering agli estremi
+  * definire lo span = percentuale di punti da inserire all'interno di una finestra
+  -> influisce sul numero di punti presenti nella finestra e la velocità con cui questa si muove verso destra
+- LWA local weigted average:
+  * calcola la media pesata di y dato il punto focale considerato
+  -> dare maggior peso alle osservazioni più vicine al punto focale 
+  zi = (xi - x0)/h distanza tra xi e x0 con h span o bandwidth dello stimatore kernel 
+  0<h<1 
+  * attribuire i pesi secondo le distanze calcolate 
+  all'aumentare di |z| diminuisce il peso
+  -> uso funzioni kernel: funzione di densità artificiale
+    - non negativa
+    - simmetrica
+    - centrata in x0
+    - se viene integrata sul range di x, è pari a 1
+- Local polynomial regression
+è uguale all'LWA, ma invece che la media, in ogni finestra stima un'equazione polinomiale di grado p 
+con p=1 -> LOESS (local linear regression smoother):
+LOESS = LWA + REG + WLS (weighted least squares regression che fittano l'equazione per minimizzare i RSS pesati)
+-> è smooth 
+-> la finestra si muove
+-> lo stimatore ottenuto in ogni finestra è non analitico nel complesso, ma analitico all'interno di ogni finestra
+-> quello finale è l'unione di tutti i punti -> miglior interpolazione tra x e y 
+se la loess è piatta non ci sono particolari pattern tra x e y 
+questo è il risultato desiderato nei 4 plot (le loess sono le linee rosse)
+
+scelta dello span h:
+trade-off perchè se h decresce bias dello stimatore decresce ma varianza campionaria dello stimatore cresce
+- a livello visivo vogliamo il minor h con il miglior smooth
+- scelta di h che minimizzi AIC, SBC o altre misure d'errore
+- scegliere h che minimizzi le misure robuste d'errore (GCV approach)
+
+-regression splines:
+  * finestra fissa 
+  * in ogni finestra applico un polinomio di grado 
+  * divido in intervalli il range di x
+  * i punti che divdiono sono detti knots
+  * inseriamo vincolo di continuità per ogni nodo
+  * altri vincoli per rendere smooth la funzione
+esempio: cubic spline (derivata 1 e 2 sui nodi per continuità) -> elevata varianza agli estremi per scarsità di punti -> intervalli di confidenza ampi agli estremi
+natural cubic spline: aggiungo 3 vincoli di confine (boundary constraints), due agli estremi e uno all'intercetta per garantire maggiore stabilità
+
+noi usiamo smoothing splines ottenuta tramite il GAM model (di solito 4 gdl)
+
+Sempre nel contesto dell'analisi della linearità, formuliamo un modello gam con la stessa struttura di model_1, seguito da uno analogo, con l'aggiunta di "s" che precedono le variabili quantitative, che, a nostro avviso, potrebbero avere una relazione non lineare con la dipendente.
+```{r}
+library(mgcv)
+model_gam = gam((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked +
+                  productsListed + productsPassRate + productsWished + 
+                  productsBought + daysSinceLastLogin + seniorityAsMonths + 
+                  language + civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp 
+                  + hasProfilePicture + optimal_countrycode, data = data_completo)
+
+model_2 = gam((productsSold)^(-0.5) ~ s(socialNbFollowers) + s(socialProductsLiked)
+              + s(productsListed) + s(productsPassRate) + s(productsWished) +
+              s(productsBought) + daysSinceLastLogin + seniorityAsMonths + language
+              + civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp +
+              hasProfilePicture + optimal_countrycode, data = data_completo)
+summary(model_2)
+
+```
+
+Dal summary del modello ricaviamo la significatività approsimativa delle trasformazioni. Valutiamo in particolare *socialNbFollowers*, *socialProductsLiked*, *productsListed* e *productsPassRate* che presentano p-value significativi.
+
+Eseguiamo ora il test del rapporto di verosomiglianza (Likelihood Ratio Test) per effettuare un confronto tra il modello lineare ottenuto in seguito alla trasformazione box-cox (model_2) e il modello gam appena formulato.
+```{r}
+anova.gam(model_gam, model_2, test = "LRT")
+```
+
+Notiamo che il p-value osservato per la statistica Chi-quadrato è prossimo a 0 pertanto possiamo concludere che il modello gam è significativamente migliore in termini di likelihood.
+
+Analizziamo i plot del modello gam per osservare graficamente se l'andamento delle covariate è lineare o segue un'altra distribuzione. 
+I grafici sono ottenuti tramite procedura splines, ovvero il grafico viene diviso in finestre che restano fisse e in ognuna viene stimato il miglior polinomio di grado 3 per i dati presenti.
+```{r}
+plot(model_2, ylim=c(-1,1))
+```
+
+Poniamo particolare attenzione all'andamento delle funzioni in corrispondenza di concentrazione maggiore di trattini, posizionati sull'asse delle ascisse, che indicano le osservazioni del dataset. 
+L'unica variabile che presenta un andamento non lineare è *productsPassRate*, quindi formuliamo un nuovo modello che presenta questa variabile anche al secondo e terzo grado.
+```{r}
+model_3 = gam((productsSold)^(-0.5) ~ s(socialNbFollowers) + s(socialProductsLiked) + 
+                s(productsListed) + productsPassRate + I(productsPassRate^2) + 
+                I(productsPassRate^3) + s(productsWished) +  s(productsBought) + 
+                daysSinceLastLogin + seniorityAsMonths + language + civilityTitle +
+                hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + 
+                optimal_countrycode, data = data_completo)
+summary(model_3)
+```
+
+Il coefficiente di terzo grado risulta significativo, pertanto manteniamo la trasformazione anche nel modello lineare.
+```{r}
+model_4 = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + 
+               productsListed + productsPassRate + I(productsPassRate^2) + 
+               I(productsPassRate^3) + productsWished + productsBought + 
+               daysSinceLastLogin + seniorityAsMonths + language + civilityTitle + 
+               hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + 
+               optimal_countrycode, data = data_completo)
+summary(model_4)
+par(mfrow=c(2,2)) 
+plot(model_4)
+par(mfrow=c(1,1))
+```
+
+Rispetto a model_1 notiamo un miglioramento di fitting anche se il nostro interesse si focalizza sui grafici. Tuttavia questi non mostrano significativi miglioramenti per quanto riguarda eteroschedasticità e residui. 
+Rimaniamo comunque soddisfatti delle trasformazioni efffettuate nell'analisi della linearità, in particolare per i miglioramenti apportati dalla trasformazione boxcox della variabile risposta.
+
+```{r}
+a = data.frame((data_completo$productsSold)^(-0.5), model_4$fitted.values)
+prova <- lm((data_completo$productsSold)^(-0.5) ~ model_4$fitted.values, data=a)
+plot((data_completo$productsSold)^(-0.5), model_4$fitted.values, ylim = c(0,1))
+abline(prova, col = 'red')
+
+```
+
+
+## Model selection
+scelta del numero di regressori
+compromesso tra R^2 elevato e basso MSE 
+modello parsimonioso e di facile interpretazione
+
+Spesso, alcune variabili inserite nel modello di regressione non sono significativamente associate con la variabile risposta. Se queste vengono incluse, pur essendo poco rilevananti, si rende il modello più complesso del necessario, complicando l'interpretazione degli output. La model selection mira dunque a rimuovere queste variabili, così da ottenere un modello facilmente interpretabile. 
+```{r}
+d0_nona <- na.omit(d0)
+model_5 = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + 
+               productsListed + productsPassRate + I(productsPassRate^2) +
+               I(productsPassRate^3) + productsWished + productsBought + 
+               daysSinceLastLogin + seniorityAsMonths + language + civilityTitle + 
+               hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + 
+               optimal_countrycode, data = d0_nona)
+```
+
+La funzione di R stepAIC con direzione "both" svolge una strategia di model selection chiamata 'stepwise selection' sul modello di interesse (nel nostro caso model_5). La stepwise selection ci permette di ottenere un modello parsimonioso, ovvero semplice e allo stesso tempo performante per prevedere la y con accuratezza.
+
+Akaike information criterion 
+AIC = nln(SSE/n)+2p
+fornisce modelli con basso SSE, penalizzando per p 
+```{r}
+library(MASS)
+step <- stepAIC(model_5, direction="both")
+```
+ 
+```{r}
+model_aic = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + 
+                 productsListed + productsPassRate + I(productsPassRate^2) + 
+                 I(productsPassRate^3) + daysSinceLastLogin + civilityTitle + 
+                 optimal_countrycode, data=d0_nona)
+summary(model_5)
+summary(model_aic)
+```
+
+Osservando i due summary, notiamo che, grazie alla stepwise selection, riusciamo ad ottenere un modello semplice e performante, senza perdite in termini di fitting. 
+
+bayesian information criterion 
+SBC = nln(SSE/n)+pln(n)
+
+In alternativa eseguiamo un altro stepwise basandoci sull'indice SBC, molto simile ad AIC, ma più severo per i modelli con un numero di covariate maggiore. Ci aspettiamo dunque un modello più semplice, con meno covariate.
+```{r}
+step2 <- stepAIC(model_5, direction="both", k = log(nrow(data_completo)))
+```
+
+Il modello rispetta le aspettative, infatti presenta due covariate in meno (*civilityTitle* e *optimalcountryCode*) rispetto a quello ottenuto con l'AIC.
+
+cp di mallow: confronta MSE tra modelli: uno completo e uno con p parametri
+CP aumenta qunado il modello con p variabili non fitta bene y
+
+```{r}
+model_sbc = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + 
+                 productsListed + productsPassRate + I(productsPassRate^2) + 
+                 I(productsPassRate^3) + daysSinceLastLogin, data=d0_nona)
+summary(model_sbc)
+```
+
+Poichè la bontà dei due modelli (model_aic e model_sbc) non differeisce in modo significativo, scegliamo di mantenere il modello più semplice per le successive analisi.
+
+Una volta svolta la model selection, rifittiamo il modello scelto sul dataset di partenza. Questo passagio è importante poichè, in certi casi, il modello più parsimonioso viene stimato su un numero di osservazioni maggiore rispetto a quello su cui è stato stimato il modello di partenza. 
+```{r}
+model_sbc2 = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + 
+                productsListed + productsPassRate + I(productsPassRate^2) + 
+                I(productsPassRate^3) + daysSinceLastLogin, data=d0)
+length(model_sbc$residuals)
+length(model_sbc2$residuals)
+```
+
+Le variabili che presentano NA values sono cambiate, il nuovo modello è stato stimato su un numero di osservazioni maggiore (15 in più), poichè abbiamo rimosso la variabile *productsBought*.
+
+metodi:
+- best subsets: trova in blocco covariate in accordo con le varie statistiche AIC, Cp, ... -> non usa costruzione di un modello gerarchico -> garantisce che le covariate offrano le migliori statistiche -> no garanzia sulla significatività 
+- stepwise selection: aggiunge e toglie una variabile alla volta, in accordo col criterio di inclusione ed esclusione -> usa costruzione di un modello gerarchico -> utile con numero di variabili elevato > 30 -> no garanzia che le covariate offrano migliori statistiche
+
+Una volta svolta la model selection, ci preoccupiamo dei valori influenti.
+
+## Valori influenti
+punti pericolosi perchè possono generare eteroschedasticità
+IRLS stimatore che stima parametri corretti per eteroschedasticità (minimi quadrati riponderati in modo iterativo)
+RR robust regression: avanzamento metodologico della procedura di IRLS : famiglia di strumenti di regressione che gestiscono gli outliers
+-> funzione che minimizza i residui attraverso stimatori M, in modo iterativo la funzione dei pesi cambia, i residui più passi hanno più il peso è elevato
+metodi:
+- tuckey: attribuisce valore 1 o 0 ai residui
+- huber: peso 1 ai residui in un range tra -k e k, agli altri pesi decrescenti
+
+Osservazioni inusuali all'interno del dataset possono risultare problematiche quando si vuole stimare un modello di regressione lineare tramite stimatori a minimi quadrati. Infatti, questi valori possono influire sui risultati dell'analisi e dunque vanno rimossi.  
+Per identificare queste particolari osservazioni, chimate valori influenti, ci serviamo di un Influence Plot che dispone le osservazioni su un grafico con in ascissa i valori degli hat-values e in ordinata i valori dei residui studentizzati.
+```{r}
+cooksd <- cooks.distance(model_sbc2)
+library(car)
+influencePlot(model_sbc2, main = "Influence plot")
+```
+
+i residui studentizzati confrontano la varianza residua di un modello con tutti i soggetti e la stessa ottenuta sul modello senza l'iesimo soggetto
+
+Dalla dimensione delle bolle nel grafico identifichiamo alcuni dei valori influenti nel nostro dataset. 
+Il venditore 9 risulta avere un alto hat-value ma un basso residuo studentizzato: questo venditore ha un elevato numero di followers iscritti al suo canale di user's activity, è un venditore che ha messo un gran numero di 'mi piace' a prodotti presenti sul social network, ma il numero di prodotti che vende non è significativamente maggiore rispetto ad altri venditori che sono molto meno attivi sui social.
+Invece i venditori 159 e 22 hanno un valore non particolarmente elevato di hat-value, ma il loro residuo studentizzato è alto: questi venditori riescono a vendere un numero di prodotti molto più alto rispetto ad altri venditori che hanno simili caratteristiche, come i numeri di followers, 'mi piace' e prodotti in lista.
+
+Grazie alle distanze di cook verifichiamo l'eventuale influenza di questi venditori sui parametri del modello e sui valori previsti. Se ciò si verifica, allora dovremo escluderli dal dataset.
+```{r}
+soglia <- 4/(length(model_sbc2$residuals)-length(model_sbc2$coefficients)-2)
+plot(cooksd, pch="*", cex=2, main="Influential Obs by Cooks distance") 
+abline(h = soglia, col="red")
+```
+
+Il grafico mostra con gli asterischi le osservazioni che presentano distanze di cook che superano la soglia 4/n-p-2 (molto prossima a 0) e procediamo con la loro rimozione dal dataset.
+```{r}
+influential <- as.numeric(names(cooksd)[cooksd > soglia])
+data_finale <- d0[-influential,]
+data_finale[c("9","22","159"),]
+```
+
+Precisamente eliminiamo 67 osservazioni (tra cui il venditore 9 e 159). 
+
+Ora confrontiamo il modello imputato sul dataset senza valori influenti e il modello imputato sul dataset completo.
+```{r}
+model_final = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + 
+                productsListed + productsPassRate + I(productsPassRate^2) + 
+                I(productsPassRate^3) + daysSinceLastLogin, data=data_finale)
+summary(model_sbc2)
+summary(model_final)
+```
+
+E' da osservare che i parametri del modello imputato sul detaset senza valori influenti cambiano (anche se non di molto) rispetto ai parametri del modello precedente. L'adattamento migliora: l'R^2 aggiustato aumenta da 0.78 a 0.82.
+
+Il modello finale stimato, qualsiasi siano gli step e trasformazioni adottate sulle variabili, resta sempre un modello lineare. 
+Il nostro obiettivo è quello di massimizzare la correlazione tra i valori osservati della variabile dipendente (*productSold*) e i valori previsti del modello, per questo motivo ricaviamo i grafici 'y vs f(y)' per il modello finale e per quello con i valori influenti, così da poterli confrontare.
+```{r}
+d1<-subset(data_finale, (!is.na(data_finale[,"productsListed"])))
+b = data.frame((d0_nona$productsSold)^(-0.5), model_sbc$fitted.values)
+prova1<- lm((d0_nona$productsSold)^(-0.5) ~ model_sbc$fitted.values, data=b)
+plot((d0_nona$productsSold)^(-0.5), model_sbc$fitted.values, ylim = c(0,1))
+abline(prova1, col = 'red')
+```
+
+```{r}
+a = data.frame((d1$productsSold)^(-0.5), model_final$fitted.values)
+prova <- lm((d1$productsSold)^(-0.5) ~ model_final$fitted.values, data=a)
+plot((d1$productsSold)^(-0.5), model_final$fitted.values, ylim = c(0,1))
+abline(prova, col = 'red')
+```
+
+Nel grafico del modello finale osserviamo che la correlazione tra y e y fittato sembra essersi rafforzata, infatti nel secondo grafico i punti sono meno dispersi attorno alla retta poichè abbiamo tolto le osservazioni influenti sul modello.
+
+```{r}
+par(mfrow=c(2,2)) 
+plot(model_final)
+par(mfrow=c(1,1))
+```
+
+Un notevole cambiamento si verifica nel grafico in basso a destra, in quanto non sono più presenti valori che oltrepassano la linea rossa della distanza di Cook. 
+La presenza di outliers e valori influenti è spesso anche fonte di eteroschedasticità, dunque, nel momento in cui questi vengono rimossi dal dataset, questo problema si attenua. Tuttavia, dai grafici questo miglioramento non appare evidente, dunque ci serviamo di test statistici più precisi.
+
+# ETEROSCHEDASTICITA'
+varianza dei residui non costante -> OLS non più i migliori, sono lineari e non distorti, ma non i più efficienti
+-> inferenza scorretta, unica cosa che si salva sono i parametri stimati
+test white e breush pagan
+H0 il modello è omoschedastico, si spera in un p-value elevato quindi 
+
+se c'è omoschedasticità la funzione di densità per gli errori non varia al cambiare di x
+
+La presenza di eteroschedasticità implica la violazione sull'assunzione di variabilità costante degli errori del modello stimato. Tale condizione comporta diverse difficoltà: gli stimatori a minimi quadrati in presenza di eteroschedasticità restano comunque stimatori lineari e corretti ma, non sono più i più efficienti, ovvero, esistono altri stimatori con varianza minore. Un altro problema, di maggior interesse, è la stima errata degli stimatori degli stadard error, su cui è basata l'inferenza. 
+Per capire se il nostro modello finale soffre di questo problema eseguiamo i test di White e Breush-Pagan su più modelli.
+```{r}
+library(lmtest)
+bptest(starting_model)
+bptest(model_5)
+bptest(model_final)
+library(car)
+ncvTest(starting_model)
+ncvTest(model_5)
+ncvTest(model_final)
+```
+
+Il modello finale soffre di eteroschedasticità, poichè rifiutiamo l'ipotesi nulla H0 di varianza costante dei residui elaborata da White. Tuttavia, è da sottolineare il miglioramento della statistica test chi-quadrato, da 27.88 a 8.4, ottenuto passando rispettivamente dal modello stimato sul dataset completo (model_5) al modello stimato sul dataset senza valori influenti (model_final).
+
+Procediamo alla stima degli standard error robusti di White, così da poter svolgere un'inferenza corretta sui nostri parametri.
+```{r}
+library('lmSupport')
+modelCorrectSE(model_final)
+```
+
+Notiamo che gli standard error robusti di white non sono particolarmente diversi dagli standard error non robusti stimati dal modello, infatti, il nostro modello non soffre di una pesante eteroschedasticità.
+Si osserva che le nuove statistiche t associate alle variabili, sono mediamente più piccole in modulo rispetto alle statistiche t stimate senza SE robusti. 
+
+Valutiamo graficamente quanto appena osservato:
+```{r}
+library('lmtest')
+library('sandwich')
+cf=as.matrix(coeftest(model_final, vcov=vcovHC(model_final)))
+plot(cf[,4], summary(model_final)$coefficients[,4] , asp = 1)
+abline(a = 0, b = 1, col = 2)
+```
+
+In ascissa sono riportati i valori dei p-value corretti e in ordinata i valori dei p-value calcolati sui parametri del modello. Rispetto alla bisettrice del grafico, la maggior parte di questi è posizionata lungo la linea (sovrapposti l'un con l'altro), eccetto uno che si discosta leggermente. Tale discostamento è sinonimo di eteroschedasticità, a conferma di quanto già considerato.
+
+## Bootstrap
+campione come la popolazione 
+R campioni con inserimento con n osservazioni -> stime del parametro per ogni r-essimo campione -> istogramma -> media finale deve essere ok -> inferenza robusta
+
+Valutiamo la robustezza del modello finale tramite la strategia Bootstrap sui parametri.
+```{r}
+library("car")
+model_final = lm((productsSold)^(-0.5) ~ socialNbFollowers + socialProductsLiked + 
+                   productsListed + productsPassRate + I(productsPassRate^2) + I(productsPassRate^3) + 
+                   daysSinceLastLogin, data=d1)
+BOOT.MOD = Boot(model_final, R=1999)
+summary(BOOT.MOD, high.moments=TRUE)
+```
+
+```{r}
+Confint(BOOT.MOD, level=c(.95), type="perc")
+hist(BOOT.MOD, legend="separate")
+```
+
+Da questi grafici possiamo osservare che i parametri del nostro modello finale sono robusti, infatti, per ogni variabile l'intervallo di confidenza Boot (empirico) è centrato sulla stima del rispettivo parametro. 
+Intuiamo, quindi, che queste stime non sovrastimano o sottostimano i vari effetti delle covariate sulla variabile dipendente (*productsSold*). L'intervallo di confidenza Boot della variabile productsPassRate comprende il valore 0, quindi possiamo concludere che questa variabile non è significativa all'interno del nostro modello. 
+
+Ricalcoliamo gli intervalli anche secondo il normal boot CI
+```{r}
+Confint(BOOT.MOD, level=c(.95), type="norm")
+```
+Questo output conferma il precedente. 
+
+## Confronti finali
+
+```{r}
+a = data.frame(data_completo$productsSold, starting_model$fitted.values)
+prova <- lm(data_completo$productsSold ~ starting_model$fitted.values, data=a)
+plot(data_completo$productsSold, starting_model$fitted.value)
+abline(prova, col = 'red')
+```
+
+Il grafico dei valori di y vs y fitted presenta una grande concentrazione di punti nella porzione a sinistra del plot. 
+La nuvola dei punti non sembra seguire un preciso andamento lineare e sono presenti diverse osservazioni anomale.
+
+
+```{r}
+a = data.frame((data_completo$productsSold)^(-0.5), model_4$fitted.values)
+prova <- lm((data_completo$productsSold)^(-0.5) ~ model_4$fitted.values, data=a)
+plot((data_completo$productsSold)^(-0.5), model_4$fitted.values, ylim = c(0,1))
+abline(prova, col = 'red')
+```
+
+
+
+
+

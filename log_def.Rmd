@@ -1,0 +1,283 @@
+---
+title: "Costruzione di un modello logistico relativo ad un e-commerce francese"
+author: "Martina Chiesa 837484, Carlo Saccardi 839641, Davide Valoti 846737"
+date: "19/11/2020"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Vogliamo anche concentrarci sulla distinzione delle due categorie: venditori e non venditori, tramite la costruzione di un modello logistico a fini interpretativi.
+Importiamo, quindi nuovamente il dataset di partenza.
+```{r}
+b <- read.csv("dati.csv", sep=",", dec = ".",  
+              stringsAsFactors=TRUE, na.strings=c("NA","NaN", "",-1))
+```
+
+## Analisi valori mancanti
+```{r}
+library(dplyr)
+sapply(b, function(x)(sum(is.na(x))))
+```
+
+Sono presenti 4944 valori mancanti per *productsListed* e 3208 per *productsWished*, quindi il modello che costruiremo lavorerà solo sui dati completi.  
+
+Rimuoviamo dal dataset le righe con i valori mancanti:
+```{r}
+b <- b[!is.na(b["productsWished"]),]
+b <- b[!is.na(b["productsListed"]),]
+sapply(b, function(x)(sum(is.na(x))))
+```
+
+Controlliamo che a questo punto non siano più presenti valori mancanti per nessuna variabile.
+
+## Variabile target 
+```{r}
+b$venditore=ifelse(b$productsSold>0,1,0)
+table(b$venditore)
+prop.table(table(b$venditore))
+b$productsSold = NULL
+```
+
+Creiamo una variabile dipendente binaria *venditore*, che assume valore 1 in caso di soggetti che hanno venduto almeno un prodotto e 0 se si tratta di individui che non hanno mai venduto. Eliminiamo, dunque, la variabile *productsSold* dal dataset.
+Appare evidente che non c'è equilibrio tra le due categorie di individui, infatti i venditori costituiscono solo il 2% degli utenti registrati.
+
+Procediamo con la ripulitura del dataset da variabili contatore (*identifierHash*) e con un numero elevato di livelli (*countryCode* e *country*). Inoltre, trasformiamo in fattore la variabile *civilityGenderId* che assume valori 1, 2 e 3, come ricodifica di *civilityTitle*:
+```{r}
+b$identifierHash = NULL
+b$civilityGenderId <- as.factor(b$civilityGenderId)
+b$countryCode = NULL
+b$country = NULL
+```
+
+## Modello iniziale
+model0 <- glm(venditore ~ type + language + socialNbFollowers + socialNbFollows + socialProductsLiked + productsListed + productsPassRate + productsWished + productsBought + gender + civilityGenderId + civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + daysSinceLastLogin + 
+seniority + seniorityAsMonths + seniorityAsYears, data=b, family = binomial)
+
+Errore nella stima, dunque verifichiamo la presenza di collinearità, zero variance e separation
+
+
+## Valutazione status delle variabili
+```{r}
+library(funModeling)
+library(dplyr)
+status=df_status(b, print_results = F)
+status
+b$type = NULL
+```
+
+Notiamo che per molte variabili la percentuale di 0 è molto elevata, ad esempio per *productsPassRate* abbiamo il 99% di zeri nel dataset. Si osserva una variabile che presenta un solo livello (*type*), quindi la rimuoviamo, poichè affetta da zero variance.
+
+## Collinearità quantitative
+```{r}
+isnumeric <- sapply(b, function(x) is.numeric(x))
+data_numeric <- b[, isnumeric]
+modello_numeriche <- glm(venditore ~ socialNbFollowers + socialNbFollows + socialProductsLiked + 
+                           productsListed + productsPassRate + productsWished + productsBought + 
+                           daysSinceLastLogin + seniority + seniorityAsMonths + seniorityAsYears,
+                         data = data_numeric, family = binomial)
+```
+
+Il modello costruito con le sole variabili numeriche non viene ancora stimato (output: glm.fit: algorithm did not convergeglm.fit: fitted probabilities numerically 0 or 1 occurred), potrebbe sussistere un problema di collinearità o separation. 
+```{r}
+library(mctest)
+imcdiag(modello_numeriche)
+```
+
+Le ultime tre variabili presentano valori molto elevati di VIF e pari a 0 di tolleranza, dunque procediamo con la rimozione di *seniority* dal modello, ma il problema sussiste, quindi ripetiamo l'operazione.
+```{r}
+modello_numeriche <- glm(venditore ~ socialNbFollowers + socialNbFollows + socialProductsLiked + productsListed + productsPassRate + productsWished + productsBought + daysSinceLastLogin + seniorityAsMonths + seniorityAsYears, data = data_numeric, family = binomial)
+```
+
+```{r}
+library(mctest)
+imcdiag(modello_numeriche)
+```
+Procediamo con la rimozione di *seniorityasYears* in accordo con le soglie di VIF e TOL.
+Il modello continua a presentare problemi.
+```{r}
+modello_numeriche <- glm(venditore ~ socialNbFollowers + socialNbFollows + socialProductsLiked + productsListed + productsPassRate + productsWished + productsBought + daysSinceLastLogin + seniorityAsMonths, data = data_numeric, family = binomial)
+```
+
+```{r}
+library(mctest)
+imcdiag(modello_numeriche)
+```
+
+Togliamo *socialNbFollows* perchè, nonostante il VIF presenti un valore accettabile secondo la nostra soglia, il TOL è minore di 0.3. Anche la colonna Klein indica multicollinearità.
+
+modello_numeriche <- glm(venditore ~ socialNbFollowers + socialProductsLiked + productsListed + productsPassRate + productsWished + productsBought + daysSinceLastLogin + seniorityAsMonths, data = data_numeric, family = binomial)
+
+error:glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+```{r}
+modello_numeriche <- glm(venditore ~ socialNbFollowers + socialProductsLiked + productsListed + productsPassRate + productsWished + productsBought + daysSinceLastLogin + seniorityAsMonths, data = data_numeric, family = binomial)
+```
+```{r}
+library(mctest)
+imcdiag(modello_numeriche)
+```
+
+
+## Collinearità qualitative
+```{r}
+factor <- b%>% dplyr::select_if(is.factor)
+library(plyr)
+combos <- combn(ncol(factor),2)
+adply(combos, 2, function(x) {
+  test <- chisq.test(factor[, x[1]], factor[, x[2]])
+  tab  <- table(factor[, x[1]], factor[, x[2]])
+  out <- data.frame("Row" = colnames(factor)[x[1]]
+                    , "Column" = colnames(factor[x[2]])
+                    , "df"= test$parameter
+                    , "p.value" = round(test$p.value, 3)
+                    , "Chi.Square norm"  =test$statistic/(sum(table(factor[,x[1]], factor[,x[2]]))* min(length(unique(factor[,x[1]]))-1 , length(unique(factor[,x[2]]))-1)))
+return(out)
+})
+```
+
+Calcoliamo il chi-quadro normalizzato tra ogni combinazione di coppie di variabili qualitative e osserviamo che le variabili *civilityGenderId*, *gender* e *civilityTitle* presentano perfetta associazione, pertanto ne eliminiamo due.
+```{r}
+factor$civilityGenderId = NULL
+factor$gender = NULL
+```
+
+## Modello completo
+```{r}
+modello_completo <- glm(venditore ~ language + socialNbFollowers + socialProductsLiked + 
+                productsListed + productsPassRate + productsWished + productsBought + 
+                civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + daysSinceLastLogin
+                + seniorityAsMonths, data=b, family = binomial)
+```
+
+modello_completo <- glm(venditore ~ language + socialNbFollowers + socialProductsLiked +  productsListed + productsPassRate + productsWished + productsBought + civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + daysSinceLastLogin
++ seniorityAsMonths, data=b, family = binomial)
+                
+error:glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+test LRT
+sotto H0: residual deviance G^2p si approssima come una chi quadrato =-2lnL(pigreco)
+- comparare modelli nidifciati: modello completo e modello senza q parametri
+test LRT = G^2p - G^2full se tutti i q parametri di cui differiscono i modelli sono pari a 0 congiuntamente, allora la differenza tra i due G è piccola, quindi LRT basso, devianza residua tra i modelli simile -> nessuna perdita nel passare dal completo al p 
+- significatività di tutti i predittori
+comparo modello completo e nullo con solo intercetta 
+- test su un singolo coefficiente (= test di Wald)
+- ottenere R^2 
+
+Il modello presenta ancora problemi, quindi procediamo con il calcolo del test LRT.
+```{r}
+drop1(modello_completo, test = 'LRT') 
+```
+
+Notiamo valori molto elevati per questo test, quello maggiore è assunto dalla variabile *productsPassRate*, quindi indaghiamo la separation tra questa variabile e quella dipendente. 
+```{r}
+table(data_numeric$venditore, data_numeric$productsPassRate)
+```
+
+Sono presenti numerosi 0 nella matrice, quindi c'è quasi perfetta separation. Questo risultato rispecchia le nostre aspettative, poichè un non venditore non può avere una percentuale maggiore di zero di prodotti la cui descrizione è coerente con il bene offerto.
+
+Stimiamo il modello escludendo questa varaibile:
+I warning sussistono, quindi ripetiamo il calcolo del test LRT sulle variabili restanti:
+```{r}
+modello_completo2 <- glm(venditore ~ language + socialNbFollowers + socialProductsLiked + 
+                productsListed + productsWished + productsBought + 
+                civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + daysSinceLastLogin
+                + seniorityAsMonths, data=b, family = binomial)
+```
+
+```{r}
+drop1(modello_completo2, test = 'LRT')
+```
+
+Osserviamo che il valore più alto per il test è presentato da *productsListed*.
+```{r}
+table(data_numeric$venditore, data_numeric$productsListed)
+```
+
+Anche questa matrice presenta numerosi 0, e quindi c'è ancora quasi perfetta separation.
+Il modello senza *productsListed* non viene ancora stimato.
+```{r}
+modello_completo3 <- glm(venditore ~ language + socialNbFollowers + socialProductsLiked + 
+                productsWished + productsBought + 
+                civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + daysSinceLastLogin
+                + seniorityAsMonths, data=b, family = binomial)
+```
+
+```{r}
+drop1(modello_completo3, test = 'LRT')
+```
+
+Il test presenta ancora valori molto elevati per *daysSinceLastLogin* e *socialNbFollowers*, quindi proviamo ad osservare i plot:
+```{r}
+plot(data_numeric$daysSinceLastLogin, data_numeric$venditore)
+```
+Non notiamo differenze significative.
+```{r}
+plot(data_numeric$socialNbFollowers, data_numeric$venditore)
+```
+
+Questo grafico, differente dal precedente, evidenzia come a valori alti del numero di followers corrispondano soggetti appartenenti alla categoria dei venditori. 
+Proviamo quindi a rimuovere questa variabile:
+```{r}
+modello_completo4 <- glm(venditore ~ language + socialProductsLiked + 
+                productsWished + productsBought + 
+                civilityTitle + hasAnyApp + hasAndroidApp + hasIosApp + hasProfilePicture + daysSinceLastLogin
+                + seniorityAsMonths, data=b, family = binomial)
+summary(modello_completo4)
+```
+
+Il modello converge e viene stimato. 
+Il modello stimato presenta la variabile *venditore* in funzione di 11 covariate qualitative e quantitative, i coefficienti stimati sono 16, ma preferiamo interpretarli come incrementi (o decrementi) moltiplicativi.
+```{r}
+library(forestmodel)
+print(forest_model(modello_completo4),text_size = 5)
+```
+
+Il plot riproduce tutti i diversi odds calcolati sul modello completo. Notiamo che la maggior parte di questi sono pari a 1, tale valore indica indipendenza tra la condizione di venditore e la variabile elencata a sinistra del plot. 
+Notiamo anche alcune attitudini dirette, ma non particolarmente elevate, sempre prossime ad 1. Ad esempio, l'attitudine ad essere venditore, comprando 2 prodotti è 1.04 volte l'attitudine ad essere venditore comprando un solo prodotto. Invece è presente attitudine inversa tra l'avere il titolo di mr o mrs e l'essere venditore rispetto al livello di riferimento di essere miss.
+L'odds più elevato è relativo alla lingua italiana, che risulta essere a parità delle altre condizioni, la più associata allo stato di venditore rispetto alle altre lingue.
+```{r}
+null = glm(venditore ~ 1, data=b,family = binomial)
+r2=1-(modello_completo4$deviance/null$deviance)
+r2
+```
+
+Il modello spiega il 34% della variabilità totale.
+
+# Accuracy
+
+identificare zone di isoprobabilità (probabilità dell'evento) nello spazio delle covariate per poter classificare i soggetti
+-> decision boundary: classificatore lineare che valuta la propensione dei soggetti ad essere classificati come Y=1 o Y=0
+```{r}
+b$venditore2 <- ifelse(modello_completo4$fitted.values > 0.5,1,0)
+table(observed=b$venditore, predicted=b$venditore2)
+```
+
+Creiamo un'ulteriore variabile dummy: venditore2. Questa assume valore 1 se i valori fittati sono superiori a 0.5, 0 diversamente, in questo modo è possibile classificare in due gruppi i soggetti. 
+
+Confrontiamo con la funzione table la classificazione dei soggetti secondo il modello stimato e la reale condizione di essere venditori o meno.
+In valori percentuali:
+```{r}
+table(observed=b$venditore, predicted=b$venditore2)/nrow(b)
+```
+
+La maggior parte dei soggetti sono stati classificati correttamente, ovvero quasi il 98% degli utenti non è venditore e viene classificato come tale dal modello.
+
+```{r}
+accuracy=0.977083601+0.002863209
+accuracy
+```
+
+Il valore della precisione è molto alto, ma in questo contesto era prevedibile data l'elevata presenza di zeri nel dataset. 
+Il modello risulta comunque migliore del modello 'naive' che stima ogni osservazione come non venditore, questo infatti avrebbe come accuracy: 91332/93252=0.9794106.
+
+
+
+
+
+
+
